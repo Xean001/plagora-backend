@@ -9,10 +9,11 @@ import (
 )
 
 type Config struct {
-	DB     DBConfig
-	JWT    JWTConfig
-	Server ServerConfig
-	Admin  AdminConfig
+	DB          DBConfig
+	JWT         JWTConfig
+	Server      ServerConfig
+	Admin       AdminConfig
+	DatabaseURL string
 }
 
 type DBConfig struct {
@@ -21,6 +22,7 @@ type DBConfig struct {
 	User     string
 	Password string
 	Name     string
+	SSLMode  string
 }
 
 type JWTConfig struct {
@@ -39,15 +41,27 @@ type AdminConfig struct {
 	Password string
 }
 
-func (d DBConfig) DSN() string {
+// 🔥 Nuevo DSN inteligente
+func (c *Config) DSN() string {
+	// Si existe DATABASE_URL la usamos directamente
+	if c.DatabaseURL != "" {
+		return c.DatabaseURL
+	}
+
+	// Si no, construimos manual (modo local)
 	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		d.Host, d.Port, d.User, d.Password, d.Name,
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		c.DB.Host,
+		c.DB.Port,
+		c.DB.User,
+		c.DB.Password,
+		c.DB.Name,
+		c.DB.SSLMode,
 	)
 }
 
 func Load() (*Config, error) {
-	// Load .env if present (ignored in production)
+	// Solo carga .env si existe (local)
 	_ = godotenv.Load()
 
 	jwtExp, err := strconv.Atoi(getEnv("JWT_EXPIRATION_HOURS", "1"))
@@ -60,28 +74,36 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid JWT_REFRESH_EXPIRATION_HOURS: %w", err)
 	}
 
-	return &Config{
+	cfg := &Config{
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+
 		DB: DBConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", "postgres"),
 			Password: getEnv("DB_PASSWORD", ""),
 			Name:     getEnv("DB_NAME", "plagora"),
+			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
+
 		JWT: JWTConfig{
 			Secret:                 mustEnv("JWT_SECRET"),
 			ExpirationHours:        jwtExp,
 			RefreshExpirationHours: jwtRefExp,
 		},
+
 		Server: ServerConfig{
-			Port:    getEnv("SERVER_PORT", "8080"),
+			Port:    getEnv("PORT", getEnv("SERVER_PORT", "8080")), // 🔥 Render compatible
 			GinMode: getEnv("GIN_MODE", "debug"),
 		},
+
 		Admin: AdminConfig{
 			Email:    getEnv("ADMIN_EMAIL", "admin@plagora.com"),
 			Password: getEnv("ADMIN_PASSWORD", "changeme"),
 		},
-	}, nil
+	}
+
+	return cfg, nil
 }
 
 func getEnv(key, fallback string) string {
