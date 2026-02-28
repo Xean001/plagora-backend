@@ -33,7 +33,7 @@ func main() {
 
 	// ─── Database ────────────────────────────────────────────────────────────
 	ctx := context.Background()
-	db, err := postgres.Connect(ctx, cfg.DB.DSN())
+	db, err := postgres.Connect(ctx, cfg.DSN())
 	if err != nil {
 		log.Fatalf("connecting to database: %v", err)
 	}
