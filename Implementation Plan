@@ -1,0 +1,282 @@
+# Plagora — Plan de Arquitectura e Implementación
+
+Sistema de gestión de ventas para el negocio de impresión 3D **Plagora**.
+
+---
+
+## Stack Tecnológico
+
+| Capa | Tecnología | Por qué |
+|------|-----------|--------|
+| Backend | **Go 1.25 + Gin** | Rápido, eficiente, fácil de deployar como binario único |
+| Base de Datos | **PostgreSQL** | Relacional, robusto, gratis y open source |
+| Web Frontend | **Angular 20** | Estructura sólida, TypeScript nativo, escalable |
+| Mobile | **Kotlin Multiplatform (KMP)** | Android nativo + compartir lógica |
+| Auth | **JWT (JSON Web Tokens)** | Stateless, seguro, compatible con todos los clientes |
+| Hosting | **Railway / Render** | Gratuito para empezar, fácil para Go + PostgreSQL |
+
+---
+
+## Diagrama de Arquitectura
+
+```mermaid
+graph TD
+    subgraph Clientes
+        A[🌐 Angular Web App]
+        B[📱 Android App - Kotlin]
+    end
+
+    subgraph Backend
+        C[Go + Gin REST API]
+        D[(PostgreSQL DB)]
+        C --> D
+    end
+
+    subgraph Seguridad
+        E[JWT Auth Middleware]
+    end
+
+    A -->|HTTPS + JWT| C
+    B -->|HTTPS + JWT| C
+    C --> E
+```
+
+---
+
+## 📁 Estructura del Proyecto (Monorepo)
+
+```
+plagora/
+├── backend/              ← Go + Gin API
+│   ├── cmd/main.go
+│   ├── internal/
+│   │   ├── auth/         ← JWT, middleware
+│   │   ├── handlers/     ← HTTP handlers (ventas, clientes, productos)
+│   │   ├── models/       ← Structs de DB
+│   │   └── db/           ← Conexión PostgreSQL
+│   └── Dockerfile
+│
+├── frontend/             ← Angular 17+
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── auth/     ← Login, guards
+│   │   │   ├── ventas/   ← Módulo de ventas
+│   │   │   ├── clientes/ ← Módulo de clientes
+│   │   │   └── dashboard/
+│   └── angular.json
+│
+└── mobile/               ← Kotlin Multiplatform
+    ├── shared/           ← Lógica compartida (modelos, API client)
+    │   ├── src/commonMain/
+    │   └── src/androidMain/
+    └── androidApp/       ← UI con Jetpack Compose
+```
+
+---
+
+## 🗄️ Esquema de Base de Datos
+
+```sql
+-- Usuarios del sistema
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT DEFAULT 'admin',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Clientes de Plagora
+CREATE TABLE clients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    phone TEXT,
+    email TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Configuración global de costos (editable por el admin)
+CREATE TABLE cost_config (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    filament_price_per_kg NUMERIC(10,2) NOT NULL,   -- Precio del kg de filamento
+    electricity_kwh_price NUMERIC(10,4) NOT NULL,   -- Precio del kWh
+    printer_wattage NUMERIC(8,2) NOT NULL,           -- Watts de la impresora
+    failure_rate_percent NUMERIC(5,2) DEFAULT 5.0,  -- % margen de error/falla
+    depreciation_per_hour NUMERIC(10,4) DEFAULT 0,  -- Desgaste impresora por hora
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Ventas (core del negocio)
+CREATE TABLE sales (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id UUID REFERENCES clients(id),
+    user_id UUID REFERENCES users(id),
+    -- Inputs de la calculadora
+    filament_grams NUMERIC(8,2),           -- Gramos de filamento usados
+    print_time_minutes INT,                -- Tiempo de impresión en minutos
+    filament_cost NUMERIC(10,4),           -- Costo de filamento calculado
+    electricity_cost NUMERIC(10,4),        -- Costo de electricidad calculado
+    failure_cost NUMERIC(10,4),            -- Costo por margen de error
+    depreciation_cost NUMERIC(10,4),       -- Desgaste de impresora
+    total_production_cost NUMERIC(10,2),   -- Suma de todos los costos
+    profit_margin_percent NUMERIC(5,2),    -- % de ganancia deseado
+    suggested_price NUMERIC(10,2),         -- Precio sugerido por la calculadora
+    -- Venta final
+    final_price NUMERIC(10,2) NOT NULL,    -- Precio que el cliente paga
+    profit NUMERIC(10,2),                  -- Ganancia real (final_price - total_cost)
+    status TEXT DEFAULT 'pendiente',       -- pendiente, en_proceso, completado, cancelado
+    payment_method TEXT,
+    paid BOOLEAN DEFAULT false,
+    material TEXT,                         -- PLA, ABS, PETG, Resina, etc.
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+## 🧮 Calculadora de Costos (en el Backend Go)
+
+> [!IMPORTANT]
+> La calculadora vive 100% en el backend. Angular solo envía los inputs; Go calcula, valida y guarda el resultado.
+
+### Flujo
+```
+Angular                          Go Backend
+  │                                │
+  │  POST /api/ventas/calcular     │
+  │ ─────────────────────────────► │  Lee cost_config de DB
+  │  { gramos, minutos, margen% }  │  Calcula costos
+  │                                │  Devuelve desglose completo
+  │ ◄───────────────────────────── │
+  │  (usuario ajusta precio final) │
+  │  POST /api/ventas              │
+  │ ─────────────────────────────► │  Guarda todo en sales
+```
+
+### Fórmulas en Go
+```go
+// Costo de filamento
+filamentCost = (gramos / 1000) * precio_kg_filamento
+
+// Costo de electricidad  
+horas = minutos / 60
+elecCost = horas * (watts_impresora / 1000) * precio_kwh
+
+// Margen de error/falla
+failureCost = (filamentCost + elecCost) * (failure_rate% / 100)
+
+// Desgaste impresora
+depreciationCost = horas * depreciation_per_hour
+
+// Costo total de producción
+totalCost = filamentCost + elecCost + failureCost + depreciationCost
+
+// Precio sugerido con margen de ganancia
+suggestedPrice = totalCost * (1 + profit_margin% / 100)
+
+// Ganancia real
+profit = finalPrice - totalCost
+```
+
+### Nuevo endpoint
+```
+POST /api/ventas/calcular   ← Calcula costos sin guardar (preview)
+POST /api/ventas            ← Calcula + guarda venta completa
+GET  /api/config/costos     ← Lee configuración actual
+PUT  /api/config/costos     ← Actualiza precios de filamento, luz, etc.
+```
+
+---
+
+## 🔐 Seguridad
+
+| Aspecto | Implementación |
+|---------|---------------|
+| Autenticación | JWT con expiración (access token 1h + refresh token 7d) |
+| Contraseñas | Bcrypt hashing (Go: `golang.org/x/crypto/bcrypt`) |
+| HTTPS | TLS en producción (Railway provee certificado automático) |
+| CORS | Configurado en Gin para solo aceptar orígenes conocidos |
+| Validación | Input validation en Go antes de llegar a la DB |
+| SQL Injection | Uso de `sqlx` / `pgx` con prepared statements |
+| Variables de entorno | `.env` local, secrets en plataforma de hosting |
+
+---
+
+## 🚀 API Endpoints (Go + Gin)
+
+```
+POST   /api/auth/login
+POST   /api/auth/refresh
+
+POST   /api/ventas/calcular  ← preview de costos (sin guardar)
+GET    /api/ventas           ← listar ventas (con filtros: fecha, estado, etc.)
+POST   /api/ventas           ← crear venta (calcula y guarda)
+GET    /api/ventas/:id       ← detalle con desglose de costos
+PUT    /api/ventas/:id       ← actualizar
+DELETE /api/ventas/:id       ← cancelar
+
+GET    /api/clientes
+POST   /api/clientes
+PUT    /api/clientes/:id
+
+GET    /api/config/costos    ← configuración: precio filamento, luz, wattage
+PUT    /api/config/costos    ← actualizar precios globales
+
+GET    /api/dashboard/stats  ← ventas del mes, ganancia total, costo total, pendientes
+```
+
+---
+
+## 📱 Mobile (Kotlin Multiplatform)
+
+- **`shared/`** contiene: modelos de datos, cliente HTTP (Ktor Client), lógica de autenticación
+- **`androidApp/`** contiene: UI con Jetpack Compose, navegación, pantallas
+
+Pantallas Android:
+- `LoginScreen`
+- `DashboardScreen` (resumen rápido de ventas)
+- `VentasListScreen`
+- `NuevaVentaScreen`
+
+---
+
+## 🌐 Frontend Angular 20
+
+Módulos:
+- `AuthModule` — login, interceptor JWT automático
+- `DashboardModule` — gráficas de ventas y ganancias (ng2-charts)
+- `VentasModule` — tabla de ventas, **calculadora de costos integrada**, detalle con desglose
+- `ClientesModule` — gestión de clientes
+- `ConfigModule` — configurar precios de filamento, electricidad, desgaste
+
+---
+
+## 📋 Fases de Desarrollo
+
+### Fase 1 — Backend Core (Go)
+1. Setup proyecto Go + Gin + PostgreSQL
+2. Auth con JWT
+3. CRUD de ventas, clientes, productos
+
+### Fase 2 — Frontend Web (Angular)
+1. Setup Angular + login
+2. Dashboard + módulo de ventas
+
+### Fase 3 — Mobile (Kotlin)
+1. Setup KMP
+2. Shared networking con Ktor Client
+3. UI Android con Compose
+
+---
+
+## ✅ Preguntas pendientes para refinar el plan
+
+> [!IMPORTANT]
+> Antes de iniciar la implementación, confirma lo siguiente:
+> 1. ¿Quieres inventario de materiales (filamento, resina) como módulo adicional?
+> 2. ¿Habrá más de un usuario (empleados) o solo tú?
+> 3. ¿Tienes preferencia de hosting? (Railway es la opción más simple para empezar)
+> 4. ¿Quieres empezar por el backend, el web, o el mobile?
